@@ -209,24 +209,24 @@ internal static class Program
 
 internal sealed class Options
 {
-    public string MarkdownPath { get; private set; } = string.Empty;
-    public string BaseUrl { get; private set; } = string.Empty;
-    public string SpaceKey { get; private set; } = string.Empty;
-    public string Title { get; private set; } = string.Empty;
-    public string ParentId { get; private set; } = string.Empty;
-    public string PageId { get; private set; } = string.Empty;
-    public string Username { get; private set; } = string.Empty;
-    public string ApiToken { get; private set; } = string.Empty;
-    public string CredentialsFile { get; private set; } = "credentials.json";
-    public string LogFile { get; private set; } = string.Empty;
-    public string MermaidCli { get; private set; } = "mmdc";
-    public bool SaveCredentials { get; private set; }
+    public string MarkdownPath { get; set; } = string.Empty;
+    public string BaseUrl { get; set; } = string.Empty;
+    public string SpaceKey { get; set; } = string.Empty;
+    public string Title { get; set; } = string.Empty;
+    public string ParentId { get; set; } = string.Empty;
+    public string PageId { get; set; } = string.Empty;
+    public string Username { get; set; } = string.Empty;
+    public string ApiToken { get; set; } = string.Empty;
+    public string CredentialsFile { get; set; } = "credentials.json";
+    public string LogFile { get; set; } = string.Empty;
+    public string MermaidCli { get; set; } = "mmdc";
+    public bool SaveCredentials { get; set; }
     public string? OAuthClientId { get; set; }
     public string? OAuthClientSecret { get; set; }
 
     public static Options Load(string[] args)
     {
-        var options = new Options();
+        var options = LoadFromConfigFile("config.json");
         var argMap = ParseArgs(args);
 
         options.MarkdownPath = GetArg(argMap, "markdown") ?? options.MarkdownPath;
@@ -242,8 +242,8 @@ internal sealed class Options
         options.MermaidCli = GetArg(argMap, "mermaid-cli") ?? options.MermaidCli;
         options.SaveCredentials = argMap.ContainsKey("save-credentials");
 
-        options.OAuthClientId = GetArg(argMap, "oauth-client-id");
-        options.OAuthClientSecret = GetArg(argMap, "oauth-client-secret");
+        options.OAuthClientId = GetArg(argMap, "oauth-client-id") ?? options.OAuthClientId;
+        options.OAuthClientSecret = GetArg(argMap, "oauth-client-secret") ?? options.OAuthClientSecret;
 
         if (string.IsNullOrWhiteSpace(options.LogFile))
         {
@@ -253,6 +253,37 @@ internal sealed class Options
         }
 
         return options;
+    }
+
+    private static Options LoadFromConfigFile(string configPath)
+    {
+        try
+        {
+            if (!File.Exists(configPath))
+            {
+                Console.WriteLine($"[DEBUG] Config file not found at: {configPath}");
+                return new Options();
+            }
+
+            var json = File.ReadAllText(configPath);
+            Console.WriteLine($"[DEBUG] Config file loaded from: {configPath}");
+            var options = JsonSerializer.Deserialize<Options>(json, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+            
+            if (options != null)
+            {
+                Console.WriteLine($"[DEBUG] Config loaded - Markdown: {options.MarkdownPath}, Space: {options.SpaceKey}, Title: {options.Title}");
+            }
+            
+            return options ?? new Options();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[DEBUG] Error loading config: {ex.Message}");
+            return new Options();
+        }
     }
 
     private static Dictionary<string, string> ParseArgs(string[] args)

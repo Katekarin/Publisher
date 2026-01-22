@@ -1,0 +1,13 @@
+{
+  "MarkdownPath": "sample.md",
+  "SpaceKey": "TS",
+  "Title": "Mój pierwszy test z OAuth",
+  "BaseUrl": "http://localhost:8090",
+  "Username": "",
+  "ApiToken": "",
+  "ParentId": "",
+  "PageId": "",
+  "MermaidCli": "mmdc",
+  "CredentialsFile": "credentials.json",
+  "SaveCredentials": false
+}
