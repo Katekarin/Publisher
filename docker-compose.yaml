@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: confluence
+      POSTGRES_PASSWORD: moje_haslo123
+      POSTGRES_DB: confluence
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  confluence:
+    image: atlassian/confluence:latest
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    ports:
+      - "8090:8090"
+      - "8091:8091"
+    environment:
+      ATL_DB_TYPE: postgresql              
+      ATL_JDBC_URL: jdbc:postgresql://postgres:5432/confluence
+      ATL_JDBC_USER: confluence
+      ATL_JDBC_PASSWORD: moje_haslo123
+      ATL_JDBC_DRIVER: org.postgresql.Driver
+      CATALINA_OPTS: "-Datlassian.oauth2.provider.skip.base.url.https.requirement=true"
+      ATL_JVM_ARGS: >
+        -Datlassian.rest.basicauth.enabled=true
+        -Datlassian.oauth2.provider.basicauth.enabled=true
+    volumes:
+      - confl-data:/var/atlassian/application-data/confluence
+
+volumes:
+  pgdata:
+  confl-data:
