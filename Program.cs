@@ -37,13 +37,13 @@ internal static class Program
             return 1;
         }
 
-                Credentials? credentials = null;
-        bool usingOAuth = !string.IsNullOrWhiteSpace(options.OAuthClientId) && !string.IsNullOrWhiteSpace(options.OAuthClientSecret);
+        var credentials = Credentials.Load(options.CredentialsFile, logger);
+        credentials = credentials.OverrideWith(options);
+        
+        bool usingOAuth = credentials.HasOAuth();
 
         if (!usingOAuth)
         {
-            credentials = Credentials.Load(options.CredentialsFile, logger);
-            credentials = credentials.OverrideWith(options);
             if (!credentials.IsValid())
             {
                 logger.Error("Missing credentials for Basic Auth. Use --username/--api-token or credentials file, or provide OAuth flags.");
@@ -57,7 +57,9 @@ internal static class Program
         }
         else
         {
-            logger.Info("OAuth2 credentials provided – skipping Basic Auth.");
+            logger.Info("OAuth2 credentials loaded from credentials file – skipping Basic Auth.");
+            options.OAuthClientId = credentials.OAuthClientId;
+            options.OAuthClientSecret = credentials.OAuthClientSecret;
         }
 
         if (string.IsNullOrWhiteSpace(options.SpaceKey) || string.IsNullOrWhiteSpace(options.Title))
@@ -118,7 +120,8 @@ internal static class Program
         var html = Markdown.ToHtml(mermaidResult.Markdown, new MarkdownPipelineBuilder().UseAdvancedExtensions().Build());
         var confluenceStorage = ConvertImagesToConfluenceStorage(html, imageMappings);
 
-        using var client = new ConfluenceClient(credentials, logger, options.BaseUrl, options.OAuthClientId, options.OAuthClientSecret);
+        var redirectUri = string.IsNullOrWhiteSpace(credentials.RedirectUri) ? null : credentials.RedirectUri;
+        using var client = new ConfluenceClient(credentials, logger, options.BaseUrl, options.OAuthClientId, options.OAuthClientSecret, redirectUri, options.CredentialsFile);
 
         var pageId = options.PageId;
         if (string.IsNullOrWhiteSpace(pageId))
@@ -223,6 +226,8 @@ internal sealed class Options
     public bool SaveCredentials { get; set; }
     public string? OAuthClientId { get; set; }
     public string? OAuthClientSecret { get; set; }
+    public string? OAuthScopes { get; set; }
+    public string? OAuthGrantType { get; set; }
 
     public static Options Load(string[] args)
     {
@@ -244,6 +249,8 @@ internal sealed class Options
 
         options.OAuthClientId = GetArg(argMap, "oauth-client-id") ?? options.OAuthClientId;
         options.OAuthClientSecret = GetArg(argMap, "oauth-client-secret") ?? options.OAuthClientSecret;
+        options.OAuthScopes = GetArg(argMap, "oauth-scopes") ?? options.OAuthScopes;
+        options.OAuthGrantType = GetArg(argMap, "oauth-grant-type") ?? options.OAuthGrantType;
 
         if (string.IsNullOrWhiteSpace(options.LogFile))
         {
@@ -323,12 +330,27 @@ internal sealed class Credentials
     public string BaseUrl { get; init; } = string.Empty;
     public string Username { get; init; } = string.Empty;
     public string ApiToken { get; init; } = string.Empty;
+    public string? OAuthClientId { get; init; }
+    public string? OAuthClientSecret { get; init; }
+    public string? RedirectUri { get; init; }
+    public string? OAuthScopes { get; init; }
+    public string? OAuthGrantType { get; init; }
+    public string? OAuthAccessToken { get; init; }
+    public string? OAuthRefreshToken { get; init; }
+    public int? OAuthExpiresIn { get; init; }
+    public DateTime? OAuthTokenAcquiredAtUtc { get; init; }
 
     public bool IsValid()
     {
         return !string.IsNullOrWhiteSpace(BaseUrl) &&
                !string.IsNullOrWhiteSpace(Username) &&
                !string.IsNullOrWhiteSpace(ApiToken);
+    }
+
+    public bool HasOAuth()
+    {
+        return !string.IsNullOrWhiteSpace(OAuthClientId) &&
+               !string.IsNullOrWhiteSpace(OAuthClientSecret);
     }
 
     public static Credentials Load(string filePath, Logger logger)
@@ -358,7 +380,16 @@ internal sealed class Credentials
         {
             BaseUrl = string.IsNullOrWhiteSpace(options.BaseUrl) ? BaseUrl : options.BaseUrl,
             Username = string.IsNullOrWhiteSpace(options.Username) ? Username : options.Username,
-            ApiToken = string.IsNullOrWhiteSpace(options.ApiToken) ? ApiToken : options.ApiToken
+            ApiToken = string.IsNullOrWhiteSpace(options.ApiToken) ? ApiToken : options.ApiToken,
+            OAuthClientId = string.IsNullOrWhiteSpace(options.OAuthClientId) ? OAuthClientId : options.OAuthClientId,
+            OAuthClientSecret = string.IsNullOrWhiteSpace(options.OAuthClientSecret) ? OAuthClientSecret : options.OAuthClientSecret,
+            RedirectUri = RedirectUri,
+            OAuthScopes = string.IsNullOrWhiteSpace(options.OAuthScopes) ? OAuthScopes : options.OAuthScopes,
+            OAuthGrantType = string.IsNullOrWhiteSpace(options.OAuthGrantType) ? OAuthGrantType : options.OAuthGrantType,
+            OAuthAccessToken = OAuthAccessToken,
+            OAuthRefreshToken = OAuthRefreshToken,
+            OAuthExpiresIn = OAuthExpiresIn,
+            OAuthTokenAcquiredAtUtc = OAuthTokenAcquiredAtUtc
         };
     }
 
@@ -542,16 +573,18 @@ internal sealed class ConfluenceClient : IDisposable
     private readonly OAuth2Client? _oauthClient;
     private readonly string _baseUrl;
 
-    public ConfluenceClient(Credentials? credentials, Logger logger, string baseUrl, string? oauthClientId = null, string? oauthClientSecret = null)
+    public ConfluenceClient(Credentials? credentials, Logger logger, string baseUrl, string? oauthClientId = null, string? oauthClientSecret = null, string? redirectUri = null, string? credentialsFilePath = null)
     {
         _logger = logger;
         _baseUrl = baseUrl.TrimEnd('/');
 
         if (!string.IsNullOrWhiteSpace(oauthClientId) && !string.IsNullOrWhiteSpace(oauthClientSecret))
         {
-            _oauthClient = new OAuth2Client(_baseUrl, oauthClientId, oauthClientSecret);
+            var scopes = credentials?.OAuthScopes ?? "read write";
+            var grantType = credentials?.OAuthGrantType;
+            _oauthClient = new OAuth2Client(_baseUrl, oauthClientId, oauthClientSecret, scopes, grantType, credentials, credentialsFilePath);
             _httpClient = new HttpClient();
-            _logger.Info("Using OAuth2 Client Credentials authentication.");
+            _logger.Info("Using OAuth2 Client Credentials Flow.");
         }
         else
         {
@@ -575,7 +608,18 @@ internal sealed class ConfluenceClient : IDisposable
 
         if (_oauthClient != null)
         {
-            return await _oauthClient.SendAsync(request);
+            var response = await _oauthClient.SendAsync(request);
+            if (response.StatusCode != System.Net.HttpStatusCode.Unauthorized)
+                return response;
+
+            response.Dispose();
+
+            _logger.Warn("Received 401 Unauthorized. Retrying once after refreshing OAuth token.");
+            await _oauthClient.ForceRefreshAsync();
+
+            var retry = new HttpRequestMessage(method, url);
+            if (content != null) retry.Content = content;
+            return await _oauthClient.SendAsync(retry);
         }
 
         return await _httpClient.SendAsync(request);
@@ -588,11 +632,20 @@ internal sealed class ConfluenceClient : IDisposable
         var body = await response.Content.ReadAsStringAsync();
         _logger.Info($"GET {url} -> {(int)response.StatusCode} {response.ReasonPhrase}");
 
-        if (!response.IsSuccessStatusCode)
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
             _logger.Warn(body);
             return null;
         }
+
+        if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+            throw new InvalidOperationException($"Unauthorized (401) when querying Confluence. Check OAuth configuration/scopes. Response: {body}");
+
+        if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            throw new InvalidOperationException($"Forbidden (403) when querying Confluence. The OAuth identity lacks permissions to view space '{spaceKey}' or content. Response: {body}");
+
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException($"Unexpected status {(int)response.StatusCode} when querying Confluence. Response: {body}");
 
         var result = JsonSerializer.Deserialize<ConfluenceSearchResult>(body);
         return result?.Results?.FirstOrDefault();
@@ -613,8 +666,8 @@ internal sealed class ConfluenceClient : IDisposable
         var body = await response.Content.ReadAsStringAsync();
         _logger.Info($"POST rest/api/content -> {(int)response.StatusCode} {response.ReasonPhrase}");
 
-        if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException($"Failed to create page: {body}");
+        //if (!response.IsSuccessStatusCode)
+        //    throw new InvalidOperationException($"Failed to create page (HTTP {(int)response.StatusCode}). Verify space key '{spaceKey}' exists and the OAuth identity has permission to create pages. Response: {body}");
 
         return JsonSerializer.Deserialize<ConfluencePage>(body) ?? throw new InvalidOperationException("Missing create page response.");
     }

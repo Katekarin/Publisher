@@ -26,6 +26,7 @@ services:
       ATL_JDBC_PASSWORD: moje_haslo123
       ATL_JDBC_DRIVER: org.postgresql.Driver
       CATALINA_OPTS: "-Datlassian.oauth2.provider.skip.base.url.https.requirement=true"
+
       ATL_JVM_ARGS: >
         -Datlassian.rest.basicauth.enabled=true
         -Datlassian.oauth2.provider.basicauth.enabled=true
