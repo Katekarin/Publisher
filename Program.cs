@@ -43,6 +43,18 @@ internal static class Program
         if (!usingOAuth)
         {
             credentials = Credentials.Load(options.CredentialsFile, logger);
+
+            logger.Info($"Attempting to load credentials from: {options.CredentialsFile}");
+            if (File.Exists(options.CredentialsFile))
+            {
+                var rawJson = await File.ReadAllTextAsync(options.CredentialsFile);
+                logger.Info($"Raw JSON from file:\n{rawJson}");
+            }
+            else
+            {
+                logger.Warn("File does not exist at the specified path.");
+            }
+
             credentials = credentials.OverrideWith(options);
             if (!credentials.IsValid())
             {

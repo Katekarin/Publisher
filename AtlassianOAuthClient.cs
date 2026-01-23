@@ -39,9 +39,10 @@ internal sealed class OAuth2Client : IDisposable
         var payload = new Dictionary<string, string>
         {
             { "grant_type", "client_credentials" },
-            { "client_id", _clientId },         // <-- Dodane
-            { "client_secret", _clientSecret }, // <-- Dodane
-            //{ "scope", _scopes }
+            // WPISZ TU DANE W CUDZYSŁOWACH NA SZTYWNO:
+            { "client_id", "12fc9fbc687e3d1c3a3f6bc6753181c1" }, 
+            { "client_secret", "c2abc438de6ff9d59773fcaaf6046a06c6d97c6b2f0ea0c3bc6a2c2c60bb80e7" }
+            // { "scope", _scopes } // To nadal zostaw zakomentowane!
         };
 
         var content = new FormUrlEncodedContent(payload);
@@ -57,7 +58,7 @@ internal sealed class OAuth2Client : IDisposable
         // ZMIANA 3: Usunięto linię request.Headers.Authorization = ... (serwer tego nie chce)
 
         Console.WriteLine($"[DEBUG] Wysyłanie token request do: {tokenUrl}");
-        // Console.WriteLine($"[DEBUG] Payload: {await content.ReadAsStringAsync()}"); // Opcjonalnie odkomentuj, ale uważaj na logowanie sekretów!
+        Console.WriteLine($"[DEBUG] Payload: {await content.ReadAsStringAsync()}"); // Opcjonalnie odkomentuj, ale uważaj na logowanie sekretów!
 
         HttpResponseMessage response;
         string body = string.Empty;

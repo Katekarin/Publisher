@@ -29,6 +29,8 @@ services:
       ATL_JVM_ARGS: >
         -Datlassian.rest.basicauth.enabled=true
         -Datlassian.oauth2.provider.basicauth.enabled=true
+        -Dconfluence.rest.basicauth.enabled=true
+        -Datlassian.http.basic.auth.enabled=true
     volumes:
       - confl-data:/var/atlassian/application-data/confluence
 
