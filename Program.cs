@@ -37,39 +37,17 @@ internal static class Program
             return 1;
         }
 
-                Credentials? credentials = null;
-        bool usingOAuth = !string.IsNullOrWhiteSpace(options.OAuthClientId) && !string.IsNullOrWhiteSpace(options.OAuthClientSecret);
-
-        if (!usingOAuth)
+        var credentials = Credentials.Load(options.CredentialsFile, logger);
+        credentials = credentials.OverrideWith(options);
+        if (!credentials.IsValid())
         {
-            credentials = Credentials.Load(options.CredentialsFile, logger);
-
-            logger.Info($"Attempting to load credentials from: {options.CredentialsFile}");
-            if (File.Exists(options.CredentialsFile))
-            {
-                var rawJson = await File.ReadAllTextAsync(options.CredentialsFile);
-                logger.Info($"Raw JSON from file:\n{rawJson}");
-            }
-            else
-            {
-                logger.Warn("File does not exist at the specified path.");
-            }
-
-            credentials = credentials.OverrideWith(options);
-            if (!credentials.IsValid())
-            {
-                logger.Error("Missing credentials for Basic Auth. Use --username/--api-token or credentials file, or provide OAuth flags.");
-                return 1;
-            }
-
-            if (options.SaveCredentials)
-            {
-                credentials.Save(options.CredentialsFile, logger);
-            }
+            logger.Error("Missing credentials. Provide username/apiToken via credentials file or command line.");
+            return 1;
         }
-        else
+
+        if (options.SaveCredentials)
         {
-            logger.Info("OAuth2 credentials provided – skipping Basic Auth.");
+            credentials.Save(options.CredentialsFile, logger);
         }
 
         if (string.IsNullOrWhiteSpace(options.SpaceKey) || string.IsNullOrWhiteSpace(options.Title))
@@ -83,6 +61,15 @@ internal static class Program
 
         var mermaidConverter = new MermaidConverter(options.MermaidCli, logger);
         var mermaidResult = await mermaidConverter.ReplaceMermaidBlocksAsync(markdownText);
+
+        logger.Info("=== MARKDOWN PO ZAMIANIE MERMAID (pierwsze 1500 znaków) ===");
+        logger.Info(mermaidResult.Markdown.Substring(0, Math.Min(1500, mermaidResult.Markdown.Length)) + (mermaidResult.Markdown.Length > 1500 ? "..." : ""));
+
+        logger.Info($"Liczba wygenerowanych załączników mermaid: {mermaidResult.Attachments.Count}");
+        foreach (var att in mermaidResult.Attachments)
+        {
+            logger.Info($"  - {att.FileName} ← z {att.SourcePath}");
+        }
 
         var attachments = new Dictionary<string, AttachmentInfo>(StringComparer.OrdinalIgnoreCase);
         foreach (var mermaidAttachment in mermaidResult.Attachments)
@@ -130,7 +117,7 @@ internal static class Program
         var html = Markdown.ToHtml(mermaidResult.Markdown, new MarkdownPipelineBuilder().UseAdvancedExtensions().Build());
         var confluenceStorage = ConvertImagesToConfluenceStorage(html, imageMappings);
 
-        using var client = new ConfluenceClient(credentials, logger, options.BaseUrl, options.OAuthClientId, options.OAuthClientSecret);
+        using var client = new ConfluenceClient(credentials, logger);
 
         var pageId = options.PageId;
         if (string.IsNullOrWhiteSpace(pageId))
@@ -233,8 +220,6 @@ internal sealed class Options
     public string LogFile { get; private set; } = string.Empty;
     public string MermaidCli { get; private set; } = "mmdc";
     public bool SaveCredentials { get; private set; }
-    public string? OAuthClientId { get; set; }
-    public string? OAuthClientSecret { get; set; }
 
     public static Options Load(string[] args)
     {
@@ -253,9 +238,6 @@ internal sealed class Options
         options.LogFile = GetArg(argMap, "log-file") ?? options.LogFile;
         options.MermaidCli = GetArg(argMap, "mermaid-cli") ?? options.MermaidCli;
         options.SaveCredentials = argMap.ContainsKey("save-credentials");
-
-        options.OAuthClientId = GetArg(argMap, "oauth-client-id");
-        options.OAuthClientSecret = GetArg(argMap, "oauth-client-secret");
 
         if (string.IsNullOrWhiteSpace(options.LogFile))
         {
@@ -515,57 +497,29 @@ internal sealed class MermaidConverter
     }
 }
 
-
 internal sealed class ConfluenceClient : IDisposable
 {
     private readonly HttpClient _httpClient;
     private readonly Logger _logger;
-    private readonly OAuth2Client? _oauthClient;
-    private readonly string _baseUrl;
 
-    public ConfluenceClient(Credentials? credentials, Logger logger, string baseUrl, string? oauthClientId = null, string? oauthClientSecret = null)
+    public ConfluenceClient(Credentials credentials, Logger logger)
     {
         _logger = logger;
-        _baseUrl = baseUrl.TrimEnd('/');
+        _httpClient = new HttpClient { BaseAddress = new Uri(credentials.BaseUrl.TrimEnd('/') + "/") };
 
-        if (!string.IsNullOrWhiteSpace(oauthClientId) && !string.IsNullOrWhiteSpace(oauthClientSecret))
-        {
-            _oauthClient = new OAuth2Client(_baseUrl, oauthClientId, oauthClientSecret);
-            _httpClient = new HttpClient();
-            _logger.Info("Using OAuth2 Client Credentials authentication.");
-        }
-        else
-        {
-            if (credentials == null || !credentials.IsValid())
-                throw new ArgumentException("Credentials required for Basic Auth.");
+        var auth = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{credentials.Username}:{credentials.ApiToken}"));
+        _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", auth);
+        _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
-            _httpClient = new HttpClient();
-            var auth = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{credentials.Username}:{credentials.ApiToken}"));
-            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", auth);
-            _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-            _logger.Info("Using Basic authentication.");
-        }
+       // _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", credentials.ApiToken);
 
-        _httpClient.BaseAddress = new Uri(_baseUrl + "/");
-    }
-
-    private async Task<HttpResponseMessage> SendRequestAsync(HttpMethod method, string url, HttpContent? content = null)
-    {
-        var request = new HttpRequestMessage(method, url);
-        if (content != null) request.Content = content;
-
-        if (_oauthClient != null)
-        {
-            return await _oauthClient.SendAsync(request);
-        }
-
-        return await _httpClient.SendAsync(request);
+        //_httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
 
     public async Task<ConfluencePage?> GetPageByTitleAsync(string spaceKey, string title)
     {
         var url = $"rest/api/content?title={Uri.EscapeDataString(title)}&spaceKey={Uri.EscapeDataString(spaceKey)}&expand=version";
-        var response = await SendRequestAsync(HttpMethod.Get, url);
+        var response = await _httpClient.GetAsync(url);
         var body = await response.Content.ReadAsStringAsync();
         _logger.Info($"GET {url} -> {(int)response.StatusCode} {response.ReasonPhrase}");
 
@@ -587,45 +541,104 @@ internal sealed class ConfluenceClient : IDisposable
             title,
             space = new { key = spaceKey },
             ancestors = string.IsNullOrWhiteSpace(parentId) ? null : new[] { new { id = parentId } },
-            body = new { storage = new { value = bodyStorage, representation = "storage" } }
+            body = new
+            {
+                storage = new
+                {
+                    value = bodyStorage,
+                    representation = "storage"
+                }
+            }
         };
 
-        var response = await SendRequestAsync(HttpMethod.Post, "rest/api/content", SerializeJson(payload));
+        var response = await _httpClient.PostAsync("rest/api/content", SerializeJson(payload));
         var body = await response.Content.ReadAsStringAsync();
         _logger.Info($"POST rest/api/content -> {(int)response.StatusCode} {response.ReasonPhrase}");
 
         if (!response.IsSuccessStatusCode)
+        {
             throw new InvalidOperationException($"Failed to create page: {body}");
+        }
 
         return JsonSerializer.Deserialize<ConfluencePage>(body) ?? throw new InvalidOperationException("Missing create page response.");
     }
 
-    public async Task<ConfluencePage> UpdatePageAsync(string pageId, string spaceKey, string title, string parentId, string bodyStorage)
+public async Task<ConfluencePage> UpdatePageAsync(string pageId, string spaceKey, string title, string parentId, string bodyStorage)
+{
+    var current = await GetPageByIdAsync(pageId);
+    
+    _logger.Info($"W UpdatePageAsync: current == null? {current == null}");
+    _logger.Info($"W UpdatePageAsync: current.Version == null? {current?.Version == null}");
+    if (current?.Version != null)
     {
-        var current = await GetPageByIdAsync(pageId);
-        if (current == null || current.Version == null)
-            throw new InvalidOperationException("Unable to retrieve current page version.");
-
-        var payload = new
-        {
-            id = pageId,
-            type = "page",
-            title,
-            space = new { key = spaceKey },
-            ancestors = string.IsNullOrWhiteSpace(parentId) ? null : new[] { new { id = parentId } },
-            version = new { number = current.Version.Number + 1 },
-            body = new { storage = new { value = bodyStorage, representation = "storage" } }
-        };
-
-        var response = await SendRequestAsync(HttpMethod.Put, $"rest/api/content/{pageId}", SerializeJson(payload));
-        var body = await response.Content.ReadAsStringAsync();
-        _logger.Info($"PUT rest/api/content/{pageId} -> {(int)response.StatusCode} {response.ReasonPhrase}");
-
-        if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException($"Failed to update page: {body}");
-
-        return JsonSerializer.Deserialize<ConfluencePage>(body) ?? throw new InvalidOperationException("Missing update page response.");
+        _logger.Info($"W UpdatePageAsync: current.Version.Number = {current.Version.Number}");
     }
+
+    if (current == null)
+    {
+        throw new InvalidOperationException("Nie udało się pobrać strony – brak odpowiedzi.");
+    }
+
+    if (current.Version == null)
+    {
+        throw new InvalidOperationException("Strona nie ma pola version – coś jest nie tak z API.");
+    }
+
+    int reportedVersion = current.Version.Number;
+    _logger.Info($"Pobrana wersja strony: {reportedVersion} (raw z JSON)");
+
+    int nextVersion;
+
+    if (reportedVersion <= 0)
+    {
+        _logger.Warn("Wersja == 0 → prawdopodobnie mismatch camelCase/PascalCase → zakładamy wersję 1 i idziemy na 2");
+        nextVersion = 2;
+    }
+    else
+    {
+        nextVersion = reportedVersion + 1;
+    }
+
+    _logger.Info($"Będziemy wysyłać wersję: {nextVersion}");
+
+    var payload = new
+    {
+        id = pageId,
+        type = "page",
+        title,
+        space = new { key = spaceKey },
+        ancestors = string.IsNullOrWhiteSpace(parentId) ? null : new[] { new { id = parentId } },
+        version = new { number = nextVersion },
+        body = new
+        {
+            storage = new
+            {
+                value = bodyStorage,
+                representation = "storage"
+            }
+        }
+    };
+
+    var response = await _httpClient.PutAsync($"rest/api/content/{pageId}", SerializeJson(payload));
+    var responseBody = await response.Content.ReadAsStringAsync();
+
+    _logger.Info($"PUT rest/api/content/{pageId} → {(int)response.StatusCode} {response.ReasonPhrase}");
+
+    if (!response.IsSuccessStatusCode)
+    {
+        _logger.Error($"Błąd aktualizacji strony: {responseBody}");
+        throw new InvalidOperationException($"Nie udało się zaktualizować strony (status {(int)response.StatusCode}): {responseBody}");
+    }
+
+    var updatedPage = JsonSerializer.Deserialize<ConfluencePage>(responseBody);
+    if (updatedPage == null)
+    {
+        throw new InvalidOperationException("Odpowiedź z aktualizacji strony jest pusta lub nie da się zdeserializować.");
+    }
+
+    _logger.Info($"Strona zaktualizowana do wersji {updatedPage.Version?.Number ?? -1}");
+    return updatedPage;
+}
 
     public async Task UploadAttachmentAsync(string pageId, AttachmentInfo attachment)
     {
@@ -643,29 +656,46 @@ internal sealed class ConfluenceClient : IDisposable
         };
         request.Headers.Add("X-Atlassian-Token", "no-check");
 
-        var response = await SendRequestAsync(HttpMethod.Post, request.RequestUri!.ToString(), request.Content);
+        var response = await _httpClient.SendAsync(request);
         var body = await response.Content.ReadAsStringAsync();
         _logger.Info($"POST rest/api/content/{pageId}/child/attachment -> {(int)response.StatusCode} {response.ReasonPhrase}");
 
         if (!response.IsSuccessStatusCode)
+        {
             _logger.Warn(body);
+        }
     }
 
     private async Task<ConfluencePage?> GetPageByIdAsync(string pageId)
+{
+    var url = $"rest/api/content/{pageId}?expand=version";
+    var response = await _httpClient.GetAsync(url);
+    var body = await response.Content.ReadAsStringAsync();
+    _logger.Info($"GET {url} -> {(int)response.StatusCode} {response.ReasonPhrase}");
+
+    if (!response.IsSuccessStatusCode)
     {
-        var url = $"rest/api/content/{pageId}?expand=version.number,body.storage,ancestors";
-        var response = await SendRequestAsync(HttpMethod.Get, url);
-        var body = await response.Content.ReadAsStringAsync();
-        _logger.Info($"GET {url} -> {(int)response.StatusCode} {response.ReasonPhrase}");
-
-        if (!response.IsSuccessStatusCode)
-        {
-            _logger.Warn(body);
-            return null;
-        }
-
-        return JsonSerializer.Deserialize<ConfluencePage>(body);
+        _logger.Warn(body);
+        return null;
     }
+
+    _logger.Info("Surowy JSON z GET page version:");
+    _logger.Info(body);
+
+    var deserializedPage = JsonSerializer.Deserialize<ConfluencePage>(body);
+    
+    _logger.Info($"Po deserializacji: Version == null? {deserializedPage?.Version == null}");
+    if (deserializedPage?.Version != null)
+    {
+        _logger.Info($"Po deserializacji: Version.Number = {deserializedPage.Version.Number}");
+    }
+    else
+    {
+        _logger.Warn("Version jest null po deserializacji – coś nie bangla z mapowaniem!");
+    }
+
+    return deserializedPage;
+}
 
     private static StringContent SerializeJson(object payload)
     {
@@ -692,7 +722,6 @@ internal sealed class ConfluenceClient : IDisposable
     public void Dispose()
     {
         _httpClient.Dispose();
-        _oauthClient?.Dispose();
     }
 }
 
@@ -704,10 +733,12 @@ internal sealed class ConfluenceSearchResult
 internal sealed class ConfluencePage
 {
     public string Id { get; set; } = string.Empty;
+
+    [JsonPropertyName("version")]
     public ConfluenceVersion? Version { get; set; }
 }
-
 internal sealed class ConfluenceVersion
 {
+    [JsonPropertyName("number")]
     public int Number { get; set; }
 }
